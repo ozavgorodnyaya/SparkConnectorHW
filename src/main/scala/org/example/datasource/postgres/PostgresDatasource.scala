@@ -1,15 +1,16 @@
 package org.example.datasource.postgres
 
+import java.sql.DriverManager
+import java.util
+
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.connector.catalog.{SupportsRead, SupportsWrite, Table, TableCapability, TableProvider}
+import org.apache.spark.sql.connector.catalog._
 import org.apache.spark.sql.connector.expressions.Transform
-import org.apache.spark.sql.connector.read.{Batch, InputPartition, PartitionReader, PartitionReaderFactory, Scan, ScanBuilder}
-import org.apache.spark.sql.connector.write.{BatchWrite, DataWriter, DataWriterFactory, LogicalWriteInfo, PhysicalWriteInfo, WriteBuilder, WriterCommitMessage}
+import org.apache.spark.sql.connector.read._
+import org.apache.spark.sql.connector.write._
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import java.sql.{DriverManager, ResultSet}
-import java.util
 import scala.collection.JavaConverters._
 
 
@@ -17,10 +18,10 @@ class DefaultSource extends TableProvider {
   override def inferSchema(options: CaseInsensitiveStringMap): StructType = PostgresTable.schema
 
   override def getTable(
-    schema: StructType,
-    partitioning: Array[Transform],
-    properties: util.Map[String, String]
-  ): Table = new PostgresTable(properties.get("tableName")) // TODO: Error handling
+                         schema: StructType,
+                         partitioning: Array[Transform],
+                         properties: util.Map[String, String]
+                       ): Table = new PostgresTable(properties.get("tableName")) // TODO: Error handling
 }
 
 class PostgresTable(val name: String) extends SupportsRead with SupportsWrite {
@@ -40,7 +41,7 @@ object PostgresTable {
   val schema: StructType = new StructType().add("user_id", LongType)
 }
 
-case class ConnectionProperties(url: String, user: String, password: String, tableName: String)
+case class ConnectionProperties(url: String, user: String, password: String, tableName: String, partitionSize: String)
 
 /** Read */
 
@@ -50,7 +51,7 @@ class PostgresScanBuilder(options: CaseInsensitiveStringMap) extends ScanBuilder
   ))
 }
 
-class PostgresPartition extends InputPartition
+case class PostgresPartition(start: Long) extends InputPartition
 
 class PostgresScan(connectionProperties: ConnectionProperties) extends Scan with Batch {
   override def readSchema(): StructType = PostgresTable.schema
@@ -70,6 +71,14 @@ class PostgresScan(connectionProperties: ConnectionProperties) extends Scan with
 
   override def createReaderFactory(): PartitionReaderFactory = new PostgresPartitionReaderFactory(connectionProperties)
 
+  def getTableSize(): Int = {
+    val connection = DriverManager.getConnection(
+      connectionProperties.url, connectionProperties.user, connectionProperties.password
+    )
+    val resultSet = connection.createStatement().executeQuery(s"select count(*) from ${connectionProperties.tableName}")
+    resultSet.next()
+    resultSet.getInt(1)
+  }
 }
 
 class PostgresPartitionReaderFactory(connectionProperties: ConnectionProperties)
@@ -82,8 +91,12 @@ class PostgresPartitionReader(connectionProperties: ConnectionProperties, offset
   private val connection = DriverManager.getConnection(
     connectionProperties.url, connectionProperties.user, connectionProperties.password
   )
-  private val statement = connection.createStatement()
-  private val resultSet = statement.executeQuery(s"select * from ${connectionProperties.tableName} limit $limit offset $offset")
+  //private val statement = connection.createStatement()
+  //private val resultSet = statement.executeQuery(s"select * from ${connectionProperties.tableName} limit $limit offset $offset")
+
+  val statement = s"select * from ${connectionProperties.tableName} limit $limit offset $offset"
+  val preparedStatement = connection.prepareStatement(statement)
+  private val resultSet = preparedStatement.executeQuery
 
   override def next(): Boolean = resultSet.next()
 
@@ -138,4 +151,3 @@ class PostgresWriter(connectionProperties: ConnectionProperties) extends DataWri
 
   override def close(): Unit = connection.close()
 }
-
